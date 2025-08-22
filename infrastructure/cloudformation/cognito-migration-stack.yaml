@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Cognito Cross-Account Migration Infrastructure'
+
+Parameters:
+  SourceAccountId:
+    Type: String
+    Description: AWS Account ID containing the source Cognito User Pool
+    
+  SourceUserPoolId:
+    Type: String
+    Description: Source Cognito User Pool ID in Account A
+    
+  SourceRegion:
+    Type: String
+    Description: AWS Region containing the source Cognito User Pool
+    Default: us-east-1
+    
+  LambdaCodeBucket:
+    Type: String
+    Description: S3 bucket containing Lambda function code
+    
+  LambdaCodeKey:
+    Type: String
+    Description: S3 key for Lambda function code zip file
+    Default: migration-function.zip
+
+Resources:
+  # Target Cognito User Pool (Account B)
+  TargetUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AWS::StackName}-target-pool'
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+      LambdaConfig:
+        UserMigration: !GetAtt MigrationLambdaFunction.Arn
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # User Pool Client
+  TargetUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref TargetUserPool
+      ClientName: !Sub '${AWS::StackName}-client'
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      GenerateSecret: false
+
+  # Lambda Execution Role
+  MigrationLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-lambda-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoMigrationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:AdminGetUser
+                Resource: !GetAtt TargetUserPool.Arn
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: !Sub 'arn:aws:iam::${SourceAccountId}:role/*-cognito-migration-cross-account-role'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  # Migration Lambda Function
+  MigrationLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-migration-function'
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt MigrationLambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Environment:
+        Variables:
+          SOURCE_ACCOUNT_ID: !Ref SourceAccountId
+          SOURCE_USER_POOL_ID: !Ref SourceUserPoolId
+          SOURCE_REGION: !Ref SourceRegion
+          TARGET_USER_POOL_ID: !Ref TargetUserPool
+      Timeout: 30
+      MemorySize: 256
+
+  # Lambda Permission for Cognito
+  CognitoLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MigrationLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt TargetUserPool.Arn
+
+  # CloudWatch Log Group
+  MigrationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${MigrationLambdaFunction}'
+      RetentionInDays: 14
+
+  # CloudWatch Dashboard
+  MigrationDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub '${AWS::StackName}-migration-dashboard'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${MigrationLambdaFunction}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Duration", ".", "." ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Migration Lambda Metrics"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  TargetUserPoolId:
+    Description: Target Cognito User Pool ID
+    Value: !Ref TargetUserPool
+    Export:
+      Name: !Sub '${AWS::StackName}-target-user-pool-id'
+      
+  TargetUserPoolClientId:
+    Description: Target Cognito User Pool Client ID
+    Value: !Ref TargetUserPoolClient
+    Export:
+      Name: !Sub '${AWS::StackName}-target-user-pool-client-id'
+      
+  MigrationLambdaFunctionArn:
+    Description: Migration Lambda Function ARN
+    Value: !GetAtt MigrationLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-migration-lambda-arn'
+      
+  CrossAccountRoleArn:
+    Description: Required Cross-Account Role ARN (to be created in Account A)
+    Value: !Sub 'arn:aws:iam::${SourceAccountId}:role/${AWS::StackName}-cognito-migration-cross-account-role'
