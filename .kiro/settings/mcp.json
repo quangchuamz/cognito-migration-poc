@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "aws-docs": {
+      "command": "uvx",
+      "args": ["awslabs.aws-documentation-mcp-server@latest"],
+      "autoApprove": [
+        "mcp_aws_docs_search_documentation",
+        "mcp_aws_docs_read_documentation",
+        "mcp_aws_docs_recommend"
+      ]
+    },
+    "github": {
+      "command": "uvx",
+      "args": ["github-mcp-server@latest"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "autoApprove": [
+        "github_get_repository",
+        "github_get_file",
+        "github_search_code"
+      ]
+    }
+  }
+}
